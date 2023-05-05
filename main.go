@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
@@ -20,8 +21,6 @@ const (
 	ELF = iota
 	// MACHO - constant for Mach-O binary format
 	MACHO = iota
-	// FAT - constant for FAT/Mach-O binary format
-	FAT = iota
 	// PE - constant for PE binary format
 	PE = iota
 )
@@ -31,7 +30,18 @@ func main() {
 	parser := argparse.NewParser("exec2shell", "Extracts TEXT section of a PE, ELF, or Mach-O executable to shellcode")
 	srcFile := parser.String("i", "in", &argparse.Options{Required: true, Help: "Input PE, ELF, or Mach-o binary"})
 	dstFile := parser.String("o", "out", &argparse.Options{Required: false,
-		Default: "shellcode.bin", Help: "Output file"})
+		Default: "shellcode.bin", Help: "Output file - Shellcode as Binary"})
+	cFile := parser.String("c", "c-outfile", &argparse.Options{Required: false,
+		Help: "Output file - Shellcode as C Array"})
+	cVar := parser.String("n", "c-var", &argparse.Options{Required: false,
+		Default: "SHELLCODE", Help: "Sets variable name for C Array output"})
+	goFile := parser.String("g", "go-outfile", &argparse.Options{Required: false,
+		Help: "Output file - Shellcode as Go Array"})
+	goPkg := parser.String("p", "go-pkg", &argparse.Options{Required: false,
+		Default: "shellcode", Help: "Sets package string for Go Array output"})
+	goVar := parser.String("v", "go-var", &argparse.Options{Required: false,
+		Default: "shellcode", Help: "Sets variable name for Go Array output"})
+
 	if err := parser.Parse(os.Args); err != nil {
 		log.Println(parser.Usage(err))
 		return
@@ -69,6 +79,9 @@ func main() {
 		log.Println("Unknown Binary Format")
 		return
 	}
+
+	var data []byte
+
 	switch btype {
 	case ELF:
 		elfFile, err := elf.NewFile(bytes.NewReader(buf))
@@ -78,17 +91,18 @@ func main() {
 		}
 		for _, p := range elfFile.Progs {
 			if p.Type == elf.PT_LOAD && p.Flags == (elf.PF_R|elf.PF_X) {
-				outb := make([]byte, p.Filesz)
-				n, err := p.ReaderAt.ReadAt(outb, 0)
+				data = make([]byte, p.Filesz)
+				n, err := p.ReaderAt.ReadAt(data, 0)
 				if n != int(p.Filesz) || err != nil {
 					log.Println(n, err)
 					return
 				}
-				err = os.WriteFile(*dstFile, outb, 0660)
+				err = os.WriteFile(*dstFile, data, 0660)
 				if err != nil {
 					log.Println(err)
+					return
 				}
-				return
+				break
 			}
 		}
 	case MACHO:
@@ -99,7 +113,7 @@ func main() {
 		}
 		for _, section := range machoFile.Sections {
 			if section.SectionHeader.Seg == "__TEXT" && section.Name == "__text" {
-				data, err := section.Data()
+				data, err = section.Data()
 				if err != nil {
 					log.Println(err)
 					return
@@ -107,8 +121,9 @@ func main() {
 				err = os.WriteFile(*dstFile, data, 0660)
 				if err != nil {
 					log.Println(err)
+					return
 				}
-				return
+				break
 			}
 		}
 	case PE:
@@ -121,7 +136,7 @@ func main() {
 			flags := section.Characteristics
 			if flags&pe.IMAGE_SCN_MEM_EXECUTE != 0 { // this section is executable
 
-				data, err := section.Data()
+				data, err = section.Data()
 				if err != nil {
 					log.Println(err)
 					return
@@ -129,9 +144,50 @@ func main() {
 				err = os.WriteFile(*dstFile, data, 0660)
 				if err != nil {
 					log.Println(err)
+					return
 				}
-				return
+				break
 			}
+		}
+	}
+
+	if len(*cFile) > 0 {
+		b := bytes.Buffer{}
+		b.WriteString(fmt.Sprintf("\nunsigned char %s[] = {", *cVar))
+		for i := 0; i < len(data); i++ {
+			if i%12 == 0 {
+				b.WriteString("\n  ")
+			}
+			b.WriteString(fmt.Sprintf("0x%02x", data[i]))
+			if i+1 != len(data) {
+				b.WriteString(", ")
+			}
+		}
+		b.WriteString("};\n\n")
+		err = os.WriteFile(*cFile, b.Bytes(), 0660)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+	}
+
+	if len(*goFile) > 0 {
+		b := bytes.Buffer{}
+		b.WriteString(fmt.Sprintf("package %s\n\nvar %s = []byte{\n", *goPkg, *goVar))
+		for i := 0; i < len(data); i++ {
+			if i%12 == 0 {
+				b.WriteString("\n  ")
+			}
+			b.WriteString(fmt.Sprintf("0x%02x", data[i]))
+			if i+1 != len(data) {
+				b.WriteString(", ")
+			}
+		}
+		b.WriteString("};\n\n")
+		err = os.WriteFile(*goFile, b.Bytes(), 0660)
+		if err != nil {
+			log.Println(err)
+			return
 		}
 	}
 }
